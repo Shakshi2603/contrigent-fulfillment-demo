@@ -73,13 +73,12 @@ class BookingService:
     ) -> Reservation:
         current = self.get_reservation(reservation_id)
         self._validate_time_range(start_time, end_time)
-        requested_resources = (
-            current.resource_ids if resource_ids is None else tuple(resource_ids)
-        )
-        if not requested_resources or any(not item.strip() for item in requested_resources):
-            raise InvalidReservationError("At least one resource ID is required.")
 
-        self._store.release_reservation(reservation_id)
+        requested_resources = (
+            current.resource_ids
+            if resource_ids is None
+            else self._normalize_resource_ids(resource_ids)
+        )
 
         for resource_id in requested_resources:
             self._ensure_resource_available_for_reschedule(
@@ -88,7 +87,6 @@ class BookingService:
                 end_time,
                 reservation_id,
             )
-            self._store.allocate(resource_id, reservation_id)
 
         updated = replace(
             current,
@@ -96,7 +94,13 @@ class BookingService:
             end_time=end_time,
             resource_ids=requested_resources,
         )
+
         self._store.save_reservation(updated)
+
+        if requested_resources != current.resource_ids:
+            self._store.release_reservation(reservation_id)
+            self._store.allocate_many(requested_resources, reservation_id)
+
         return updated
 
     def cancel_reservation(self, reservation_id: str) -> Reservation:
@@ -164,7 +168,7 @@ class BookingService:
         for existing in self._store.reservations_for_resource(resource_id):
             if existing.reservation_id == reservation_id:
                 continue
-            if start_time <= existing.end_time and existing.start_time < end_time:
+            if self._overlaps(start_time, end_time, existing.start_time, existing.end_time):
                 raise BookingConflictError(
                     f"Resource '{resource_id}' is already booked by "
                     f"'{existing.reservation_id}'."
